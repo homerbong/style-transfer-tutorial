@@ -5,6 +5,4 @@
 *.pth
 
 # datasets
-data
-images
 output*
