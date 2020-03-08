@@ -1,0 +1,8 @@
+# Editor settings
+.vscode
+
+# Network parameters
+*.pth
+
+# datasets
+output*
