@@ -1,5 +1,6 @@
 from __future__ import print_function
 from datetime import datetime
+import numpy as np
 
 import copy
 
@@ -54,6 +55,7 @@ class InputImages:
         image = Image.open(image_name)
         image = self.resize_to_square(image)
         image = self.loader(image).unsqueeze(0)
+        print('Tensor Image: ', image.size())
         return image.to(device, torch.float)
 
     def get_predefined_style_image(self, device=torch.device('cpu')):
@@ -188,6 +190,7 @@ class StyleLoss(nn.Module):
         feature_maps_number -> number of features maps K = a*b
         (c, d) -> dimensions of a features map. N = c*d
         """
+        # TODO rename variables.
         (batch_size, feature_maps_number,
          feature_length, feature_width) = layer_input.size()
 
@@ -220,6 +223,46 @@ class VggNet:
     def get_cnn(self):
         """Returns the the VGG 19 Convolutional Network"""
         return self.cnn
+
+    def visualize_feature_maps(self, input, layer_number, feature_map_number):
+        self.visualizations = []
+        self.inputs = []
+
+        def hook_fn(module, layer_input, layer_output):
+            # print('module: ', module)
+            # print('input', input)
+            self.visualizations.append(layer_output)
+            self.inputs.append(layer_input)
+        
+        for name, layer in self.cnn._modules.items():
+            if isinstance(layer, nn.ReLU):
+                layer.register_forward_hook(hook_fn)
+        
+        output = self.cnn(input)
+        # print(self.visualizations.keys())
+        plt.ioff()
+        for layer_index, layer in enumerate(self.visualizations):
+            if layer_index == layer_number:
+                try:
+                    feature_map = np.squeeze(
+                        layer[0, feature_map_number]
+                    ).data.numpy()
+                    feature_map_input = np.squeeze(
+                        self.inputs[layer_index][0][0, feature_map_number]
+                    ).data.numpy()
+                except:
+                    print('Something went wrong.');
+                    break
+            # print(self.visualizations[layer_name].size())
+                plt.ioff()
+                plt.figure()
+                plt.imshow(feature_map, cmap='gray');
+                plt.figure()
+                plt.imshow(feature_map_input, cmap='gray')
+                break
+            # print(self.visualizations[layer_name][0][0].size())
+        plt.show()
+
 
 class Normalization(nn.Module):
     """
@@ -411,22 +454,23 @@ def main():
     input_images.verify_images(style_image, content_image)
     input_images.show_images()
     vgg19 = VggNet(style_transfer_device)
-    style_transfer = StyleTransferNetwork(
-        vgg19.get_cnn(),
-        vgg19.get_normalization_mean(),
-        vgg19.get_normalization_std(),
-        style_image,
-        content_image,
-        # True
-    )
-    output = style_transfer.run_style_transfer()
+    activations = vgg19.visualize_feature_maps(style_image, 0, 8)
+    # style_transfer = StyleTransferNetwork(
+    #     vgg19.get_cnn(),
+    #     vgg19.get_normalization_mean(),
+    #     vgg19.get_normalization_std(),
+    #     style_image,
+    #     content_image,
+    #     # True
+    # )
+    # output = style_transfer.run_style_transfer()
 
-    plt.figure()
-    input_images.imshow(output, title='Output Image', is_save=True)
+    # plt.figure()
+    # input_images.imshow(output, title='Output Image', is_save=True)
 
     # sphinx_gallery_thumbnail_number = 4
-    plt.ioff()
-    plt.show()
+    # plt.ioff()
+    # plt.show()
 
 if __name__ == "__main__":
     main()
