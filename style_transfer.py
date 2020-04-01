@@ -179,6 +179,7 @@ class StyleLoss(nn.Module):
         and the target which is defined in the constructor and is G_{SL}
         """
         gram_product_input = self.gram_matrix(layer_input)
+        # self.loss = F.mse_loss(gram_product_input, self.gram_product_style)
         self.loss = F.l1_loss(gram_product_input, self.gram_product_style)
         return layer_input
 
@@ -192,13 +193,13 @@ class StyleLoss(nn.Module):
         It must be normalized by dividing each element by the total number of
         elements in the matrix.
         batch_size = 1
-        feature_maps_number -> number of features maps K = a*b
+        feature_channels -> number of features maps K = a*b
         (c, d) -> dimensions of a features map. N = c*d
         """
-        (batch_size, feature_maps_number,
+        (batch_size, feature_channels,
          feature_map_height, feature_map_width) = layer_input.size()
 
-        features_channels = batch_size * feature_maps_number
+        features_channels = batch_size * feature_channels
         feature_map_size = feature_map_height * feature_map_width
         features = layer_input.view(features_channels, feature_map_size)
         gram_product = torch.mm(features, features.t())
