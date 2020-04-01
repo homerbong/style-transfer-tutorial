@@ -15,6 +15,8 @@ import matplotlib.pyplot as plt
 import torchvision.transforms as transforms
 import torchvision.models as models
 
+# import kornia
+
 class InputImages:
     """
     Class used to load and make the necessary manipulations to the images
@@ -147,13 +149,15 @@ class ContentLoss(nn.Module):
         # not a variable. Otherwise the forward method of the criterion
         # will throw an error.
         self.target = target.detach()
+        self.loss = None
 
     def forward(self, layer_input):
         """
         It computes the content loss between the input which the F_{XL}
         and the target which is defined in the constructor and is F_{CL}
         """
-        self.loss = F.mse_loss(layer_input, self.target)
+        # self.loss = F.mse_loss(layer_input, self.target)
+        self.loss = F.l1_loss(layer_input, self.target)
         return layer_input
 
 class StyleLoss(nn.Module):
@@ -167,6 +171,7 @@ class StyleLoss(nn.Module):
     def __init__(self, target_feature):
         super(StyleLoss, self).__init__()
         self.gram_product_style = self.gram_matrix(target_feature).detach()
+        self.loss = None
 
     def forward(self, layer_input):
         """
@@ -174,7 +179,7 @@ class StyleLoss(nn.Module):
         and the target which is defined in the constructor and is G_{SL}
         """
         gram_product_input = self.gram_matrix(layer_input)
-        self.loss = F.mse_loss(gram_product_input, self.gram_product_style)
+        self.loss = F.l1_loss(gram_product_input, self.gram_product_style)
         return layer_input
 
     def gram_matrix(self, layer_input):
@@ -190,15 +195,14 @@ class StyleLoss(nn.Module):
         feature_maps_number -> number of features maps K = a*b
         (c, d) -> dimensions of a features map. N = c*d
         """
-        # TODO rename variables.
         (batch_size, feature_maps_number,
-         feature_length, feature_width) = layer_input.size()
+         feature_map_height, feature_map_width) = layer_input.size()
 
-        features_length = batch_size * feature_maps_number
-        features_height = feature_length * feature_width
-        features = layer_input.view(features_length, features_height)
+        features_channels = batch_size * feature_maps_number
+        feature_map_size = feature_map_height * feature_map_width
+        features = layer_input.view(features_channels, feature_map_size)
         gram_product = torch.mm(features, features.t())
-        total_elements = features_length * features_height
+        total_elements = features_channels * feature_map_size
         return gram_product.div(total_elements)
 
 class VggNet:
@@ -303,8 +307,9 @@ class StyleTransferNetwork:
     def __init__(self, cnn, normalization_mean, normalization_std,
                  style_img, content_img, use_random_noise=False):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.content_layers_default = ['conv_4']
-        self.style_layers_default = ['conv_1', 'conv_2', 'conv_3', 'conv_4', 'conv_5']
+        self.content_layers_default = ['relu_3_2']
+        # self.style_layers_default = ['conv_1', 'conv_2', 'conv_3', 'conv_4', 'conv_5']
+        self.style_layers_default = ['relu_1_1', 'relu_2_1', 'relu_3_1', 'relu_4_1', 'relu_5_1']
         self.cnn = cnn
         self.normalization_mean = normalization_mean
         self.normalization_std = normalization_std
@@ -338,38 +343,42 @@ class StyleTransferNetwork:
         # to put in modules that are supposed to be activated sequentially
         model = nn.Sequential(normalization)
 
-        i = 0  # increment every time we see a conv
+        block, number = 1, 1  # increment every time we see a conv
         for layer in cnn.children():
             if isinstance(layer, nn.Conv2d):
-                i += 1
-                name = 'conv_{}'.format(i)
+                name = 'conv_{}_{}'.format(block, number)
             elif isinstance(layer, nn.ReLU):
-                name = 'relu_{}'.format(i)
+                name = 'relu_{}_{}'.format(block, number)
                 # The in-place version doesn't play very nicely with the ContentLoss
                 # and StyleLoss we insert below. So we replace with out-of-place
                 # ones here.
                 layer = nn.ReLU(inplace=False)
+                number += 1
             elif isinstance(layer, nn.MaxPool2d):
-                name = 'pool_{}'.format(i)
+                name = 'pool_{}'.format(block)
+                layer = nn.AvgPool2d(layer.kernel_size, layer.stride)
+                block += 1
+                number = 1
             elif isinstance(layer, nn.BatchNorm2d):
-                name = 'bn_{}'.format(i)
+                name = 'bn_{}'.format(block)
             else:
                 raise RuntimeError('Unrecognized layer: {}'.format(layer.__class__.__name__))
-
+            
+            print(name)
             model.add_module(name, layer)
 
             if name in self.content_layers_default:
                 # add content loss:
                 target = model(self.content_image).detach()
                 content_loss = ContentLoss(target)
-                model.add_module("content_loss_{}".format(i), content_loss)
+                model.add_module("content_loss_{}".format(block), content_loss)
                 content_losses.append(content_loss)
 
             if name in self.style_layers_default:
                 # add style loss:
                 target_feature = model(self.style_image).detach()
                 style_loss = StyleLoss(target_feature)
-                model.add_module("style_loss_{}".format(i), style_loss)
+                model.add_module("style_loss_{}".format(block), style_loss)
                 style_losses.append(style_loss)
 
         # now we trim off the layers after the last content and style losses
@@ -387,10 +396,11 @@ class StyleTransferNetwork:
         Leon Gatys himself
         """
         # this line to show that input is a parameter that requires a gradient
-        optimizer = optim.LBFGS([self.input_image.requires_grad_()])
+        # optimizer = optim.LBFGS([self.input_image.requires_grad_()])
+        optimizer = optim.Adam([self.input_image.requires_grad_()], lr=0.5)
         return optimizer
 
-    def run_style_transfer(self, num_steps=300, style_weight=1000000,
+    def run_style_transfer(self, num_steps=1024, style_weight=1000.,
                            content_weight=1):
         """Run the style transfer."""
         print('Building the style transfer model..')
@@ -399,6 +409,11 @@ class StyleTransferNetwork:
 
         print('Optimizing..')
         run = [0]
+        image_batch, image_channels, image_height, image_width = self.content_image.data.size()
+        transform = nn.Sequential(
+            kornia.augmentation.RandomResizedCrop(
+                size=(image_height, image_width), scale=(.97, 1.), ratio=(.97, 1.03)),
+            kornia.augmentation.RandomRotation(degrees=1.))
         while run[0] <= num_steps:
 
             def closure():
@@ -406,6 +421,10 @@ class StyleTransferNetwork:
                 self.input_image.data.clamp_(0, 1)
 
                 optimizer.zero_grad()
+                self.input_image = transform(self.input_image)
+                image_channels, image_width, image_height = self.input_image.size()
+                self.input_image = self.input_image.view(
+                    -1, image_channels, image_width, image_height).clamp_(0, 1)
                 model(self.input_image)
                 style_score = 0
                 content_score = 0
@@ -447,30 +466,30 @@ def main():
     )
     input_images = InputImages()
     style_image, content_image = input_images.get_images(
-        './data/images/vangogh.jpg',
+        './data/images/picasso.jpg',
         None,
         device=style_transfer_device
     )
     input_images.verify_images(style_image, content_image)
     input_images.show_images()
     vgg19 = VggNet(style_transfer_device)
-    activations = vgg19.visualize_feature_maps(style_image, 0, 8)
-    # style_transfer = StyleTransferNetwork(
-    #     vgg19.get_cnn(),
-    #     vgg19.get_normalization_mean(),
-    #     vgg19.get_normalization_std(),
-    #     style_image,
-    #     content_image,
-    #     # True
-    # )
-    # output = style_transfer.run_style_transfer()
+    # activations = vgg19.visualize_feature_maps(style_image, 0, 8)
+    style_transfer = StyleTransferNetwork(
+        vgg19.get_cnn(),
+        vgg19.get_normalization_mean(),
+        vgg19.get_normalization_std(),
+        style_image,
+        content_image,
+        True
+    )
+    output = style_transfer.run_style_transfer(num_steps=1024, style_weight=10000)
 
-    # plt.figure()
-    # input_images.imshow(output, title='Output Image', is_save=True)
+    plt.figure()
+    input_images.imshow(output, title='Output Image', is_save=True)
 
     # sphinx_gallery_thumbnail_number = 4
-    # plt.ioff()
-    # plt.show()
+    plt.ioff()
+    plt.show()
 
 if __name__ == "__main__":
     main()
