@@ -1,8 +1,8 @@
+import copy
+
 from __future__ import print_function
 from datetime import datetime
 import numpy as np
-
-import copy
 
 import torch
 import torch.nn as nn
@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import torchvision.transforms as transforms
 import torchvision.models as models
 
-# import kornia
+import kornia
 
 class InputImages:
     """
@@ -170,7 +170,7 @@ class StyleLoss(nn.Module):
 
     def __init__(self, target_feature):
         super(StyleLoss, self).__init__()
-        self.gram_product_style = self.gram_matrix(target_feature).detach()
+        self.gram_product_style = self.gram_matrix(target_feature.detach()).detach()
         self.loss = None
 
     def forward(self, layer_input):
@@ -193,13 +193,13 @@ class StyleLoss(nn.Module):
         It must be normalized by dividing each element by the total number of
         elements in the matrix.
         batch_size = 1
-        feature_channels -> number of features maps K = a*b
+        feature_maps_number -> number of features maps K = a*b
         (c, d) -> dimensions of a features map. N = c*d
         """
-        (batch_size, feature_channels,
+        (batch_size, feature_maps_number,
          feature_map_height, feature_map_width) = layer_input.size()
 
-        features_channels = batch_size * feature_channels
+        features_channels = batch_size * feature_maps_number
         feature_map_size = feature_map_height * feature_map_width
         features = layer_input.view(features_channels, feature_map_size)
         gram_product = torch.mm(features, features.t())
@@ -216,6 +216,8 @@ class VggNet:
         self.cnn = models.vgg19(pretrained=True).features.to(device).eval()
         self.cnn_normalization_mean = torch.tensor([0.485, 0.456, 0.406]).to(device)
         self.cnn_normalization_std = torch.tensor([0.229, 0.224, 0.225]).to(device)
+        self.visualizations = []
+        self.inputs = []
 
     def get_normalization_mean(self):
         """Returns the normalization mean tensor"""
@@ -230,21 +232,26 @@ class VggNet:
         return self.cnn
 
     def visualize_feature_maps(self, input, layer_number, feature_map_number):
+        """
+            This method is used to visualize the feature maps of the CNN by
+            using hooks that help us see the input and output of a given
+            layer. Then for ReLU layers it saves the output into a class
+            variable so that we can see them. The feature maps show the
+            activations of the filters applied to the image into the different
+            areas of the image.
+        """
         self.visualizations = []
         self.inputs = []
 
         def hook_fn(module, layer_input, layer_output):
-            # print('module: ', module)
-            # print('input', input)
             self.visualizations.append(layer_output)
             self.inputs.append(layer_input)
-        
-        for name, layer in self.cnn._modules.items():
+
+        for _, layer in self.cnn._modules.items():
             if isinstance(layer, nn.ReLU):
                 layer.register_forward_hook(hook_fn)
-        
-        output = self.cnn(input)
-        # print(self.visualizations.keys())
+
+        self.cnn(input)
         plt.ioff()
         for layer_index, layer in enumerate(self.visualizations):
             if layer_index == layer_number:
@@ -256,12 +263,12 @@ class VggNet:
                         self.inputs[layer_index][0][0, feature_map_number]
                     ).data.numpy()
                 except:
-                    print('Something went wrong.');
+                    print('Something went wrong.')
                     break
             # print(self.visualizations[layer_name].size())
                 plt.ioff()
                 plt.figure()
-                plt.imshow(feature_map, cmap='gray');
+                plt.imshow(feature_map, cmap='gray')
                 plt.figure()
                 plt.imshow(feature_map_input, cmap='gray')
                 break
@@ -327,7 +334,9 @@ class StyleTransferNetwork:
         This function is used to redesign the original VGG 19 network
         by adding the style loss and the content loss layers where needed.
         Basically it adds style loss or content loss computations after
-        predefined networks.
+        predefined networks. Three layers are added in the beggining in
+        order to perform data augmentation which is rotates, crops the
+        input in order to better localize the features we're interested in.
         """
         cnn = copy.deepcopy(self.cnn)
 
@@ -342,7 +351,23 @@ class StyleTransferNetwork:
 
         # assuming that cnn is a nn.Sequential, so we make a new nn.Sequential
         # to put in modules that are supposed to be activated sequentially
+        _, _, image_height, image_width = self.input_image.size()
         model = nn.Sequential(normalization)
+        model.add_module(
+            'crop',
+            kornia.augmentation.RandomResizedCrop(
+                size=(image_height, image_width),
+                scale=(.97, 1.), ratio=(.97, 1.03)
+            )
+        )
+        model.add_module(
+            'rotate',
+            kornia.augmentation.RandomRotation(degrees=1.)
+        )
+        model.add_module(
+            'add_batch_layer',
+            AddBatchLayer()
+        )
 
         block, number = 1, 1  # increment every time we see a conv
         for layer in cnn.children():
@@ -364,7 +389,7 @@ class StyleTransferNetwork:
                 name = 'bn_{}'.format(block)
             else:
                 raise RuntimeError('Unrecognized layer: {}'.format(layer.__class__.__name__))
-            
+
             print(name)
             model.add_module(name, layer)
 
@@ -398,7 +423,7 @@ class StyleTransferNetwork:
         """
         # this line to show that input is a parameter that requires a gradient
         # optimizer = optim.LBFGS([self.input_image.requires_grad_()])
-        optimizer = optim.Adam([self.input_image.requires_grad_()], lr=0.5)
+        optimizer = optim.Adam([self.input_image.requires_grad_()], lr=0.05)
         return optimizer
 
     def run_style_transfer(self, num_steps=1024, style_weight=1000.,
@@ -410,11 +435,6 @@ class StyleTransferNetwork:
 
         print('Optimizing..')
         run = [0]
-        image_batch, image_channels, image_height, image_width = self.content_image.data.size()
-        transform = nn.Sequential(
-            kornia.augmentation.RandomResizedCrop(
-                size=(image_height, image_width), scale=(.97, 1.), ratio=(.97, 1.03)),
-            kornia.augmentation.RandomRotation(degrees=1.))
         while run[0] <= num_steps:
 
             def closure():
@@ -422,10 +442,6 @@ class StyleTransferNetwork:
                 self.input_image.data.clamp_(0, 1)
 
                 optimizer.zero_grad()
-                self.input_image = transform(self.input_image)
-                image_channels, image_width, image_height = self.input_image.size()
-                self.input_image = self.input_image.view(
-                    -1, image_channels, image_width, image_height).clamp_(0, 1)
                 model(self.input_image)
                 style_score = 0
                 content_score = 0
@@ -457,6 +473,21 @@ class StyleTransferNetwork:
 
         return self.input_image
 
+class AddBatchLayer(nn.Module):
+    """This class is only used to add a batch column in the image tensor"""
+    def __init__(self):
+        super(AddBatchLayer, self).__init__()
+
+    def forward(self, input):
+        """
+            Simply restructures the tensor. Receives a 3D input from
+            data augmentation and returns a 4D tensor.
+        """
+        image_channels, image_height, image_width = input.size()
+        input_with_batch = input.view(
+            -1, image_channels, image_height, image_width
+        )
+        return input_with_batch
 
 def main():
     """Function used to execute the script"""
@@ -483,7 +514,13 @@ def main():
         content_image,
         True
     )
-    output = style_transfer.run_style_transfer(num_steps=1024, style_weight=10000)
+    # output = style_transfer.run_style_transfer(num_steps=300, style_weight=5000000.)
+    # settings for output_1_data_aug/no_data_aug
+    # output = style_transfer.run_style_transfer(num_steps=300, style_weight=2000.)
+    # settings for output_1_l1loss_data_aug/no_data_aug
+    # output = style_transfer.run_style_transfer(num_steps=1500, style_weight=5000000.)
+    # settings used for output_1_adam_data_aug/no_data_aug
+    output = style_transfer.run_style_transfer(num_steps=1500, style_weight=2000.)
 
     plt.figure()
     input_images.imshow(output, title='Output Image', is_save=True)
